@@ -1,0 +1,934 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 全景預覽器 (支援照片/影片)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.js"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #0f171a;
+            color: white;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+            cursor: grab;
+        }
+        #canvas-container:active {
+            cursor: grabbing;
+        }
+        .overlay {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            pointer-events: none;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            max-height: calc(100% - 30px);
+        }
+        .controls {
+            pointer-events: auto;
+        }
+        #drop-zone {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(15, 23, 42, 0.8);
+            border: 4px dashed #3b82f6;
+            z-index: 50;
+            transition: opacity 0.3s;
+            opacity: 0;
+            pointer-events: none;
+        }
+        #drop-zone.active {
+            opacity: 1;
+        }
+        .loading-spinner {
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            border-left-color: #3b82f6;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .panel-content {
+            transition: max-height 0.3s ease-out, opacity 0.2s ease-in-out;
+            max-height: 500px;
+            overflow: hidden;
+        }
+        .panel-minimized .panel-content {
+            max-height: 0;
+            opacity: 0;
+            pointer-events: none;
+            margin-top: 0;
+        }
+
+        /* 📱 行動端與橫式介面自動適應優化 */
+        @media screen and (orientation: landscape) and (max-height: 600px) {
+            .overlay {
+                top: 10px;
+                left: 10px;
+                max-height: calc(100% - 20px);
+            }
+            #mainPanel {
+                max-w-[130px] !important;
+                padding: 1.5px 2px !important;
+                transform: scale(0.9);
+                transform-origin: top left;
+            }
+            .panel-content {
+                max-height: 220px;
+                overflow-y: auto;
+            }
+            #galleryContainer {
+                gap: 1.5px !important;
+            }
+            #gps-banner {
+                bottom: 12px !important;
+                padding: 1.5px 3px !important;
+                transform: scale(0.9) translateX(-50%);
+                transform-origin: bottom left;
+            }
+            #video-controls {
+                bottom: 55px !important;
+            }
+            #non-360-banner {
+                bottom: 80px !important;
+                padding: 3px 8px !important;
+                transform: scale(0.9) translateX(-50%);
+                transform-origin: bottom left;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="drop-zone">
+        <div class="text-center">
+            <div class="text-4xl mb-4">📸</div>
+            <div class="text-2xl font-bold">放開滑鼠即可載入全景圖或影片</div>
+        </div>
+    </div>
+
+    <div class="overlay gap-2">
+        <div id="mainPanel" class="bg-slate-900/70 backdrop-blur-md p-2.5 rounded-lg shadow-2xl border border-white/10 controls w-full max-w-[150px]">
+            <div class="flex justify-between items-center">
+                <h1 class="text-[11px] font-bold flex items-center gap-1 whitespace-nowrap">
+                    <span class="text-blue-400 font-black">SPHERE</span> 360
+                </h1>
+                <button id="toggleBtn" class="text-slate-400 hover:text-white p-0.5 transition-colors" title="收合/展開">
+                    <svg id="toggleIcon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+                </button>
+            </div>
+            
+            <div class="panel-content mt-2 text-center">
+                <p class="text-slate-300 text-[11px] mb-2 leading-tight font-medium">
+                    請上傳 2:1 全景圖或影片
+                </p>
+                
+                <div class="flex flex-col gap-1.5">
+                    <input type="file" id="fileInput" class="hidden" accept="image/*,video/mp4,video/webm">
+                    <button onclick="document.getElementById('fileInput').click()" 
+                            class="w-full bg-blue-600 hover:bg-blue-500 text-white text-[12px] font-bold py-1 px-1.5 rounded-md transition-all shadow-md shadow-blue-600/10 flex items-center justify-center gap-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+                        選取檔案
+                    </button>
+                    
+                    <div id="galleryContainer" class="hidden w-full flex flex-col gap-2 mt-2 py-1">
+                        </div>
+                </div>
+                <p class="text-[11px] text-slate-400 mt-2">滾輪可縮放視角</p>
+                <p class="text-[11px] text-slate-400 mt-0.5">F11 切換到全畫面</p>
+            </div>
+        </div>
+
+        <div id="status-card" class="hidden bg-slate-900/80 backdrop-blur-md p-1.5 px-2.5 rounded-md border border-white/10 flex items-center gap-2">
+            <div class="loading-spinner w-3.5 h-3.5"></div>
+            <div id="status-text" class="text-[10px] font-medium text-slate-300">處理中...</div>
+        </div>
+    </div>
+
+    <div id="msgToast" class="fixed bottom-10 left-1/2 -translate-x-1/2 bg-red-500 text-white text-xs px-4 py-2 rounded-full shadow-2xl opacity-0 transition-opacity pointer-events-none z-[100]">
+        錯誤訊息
+    </div>
+
+    <!-- 非 360 比例提示 (改為半透明深色底 + 橘色細框) -->
+    <div id="non-360-banner" class="fixed bottom-[100px] left-1/2 -translate-x-1/2 bg-slate-900/70 backdrop-blur-md px-4 py-2 rounded-full border border-amber-500/50 shadow-[0_10px_40px_rgba(0,0,0,0.5)] transition-all duration-300 opacity-0 pointer-events-none translate-y-4 flex items-center gap-2 z-50">
+        <span class="text-[14px]">⚠️</span>
+        <span class="text-[12px] font-medium text-amber-50/90 tracking-wide">非 360全景格式 (切換平面模式)</span>
+    </div>
+
+    <div id="gps-banner" class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-900/50 backdrop-blur-md px-4 py-2.5 rounded-full border border-white/20 shadow-[0_10px_40px_rgba(0,0,0,0.5)] transition-all duration-300 opacity-0 pointer-events-none translate-y-4 flex items-center gap-3 z-40">
+        <span id="gps-text" class="text-[12px] font-medium text-white tracking-wide">無座標資訊</span>
+        <a id="gps-link" href="#" target="_blank" class="hidden bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold px-2.5 py-1 rounded shadow transition-colors flex items-center gap-1">
+            GO
+            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" x2="21" y1="14" y2="3"/></svg>
+        </a>
+        <button id="gps-add-btn" class="hidden bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold px-2.5 py-1 rounded shadow transition-colors flex items-center gap-1 pointer-events-auto">
+            ➕ 加入座標
+        </button>
+    </div>
+
+    <div id="video-controls" class="fixed bottom-[80px] left-1/2 -translate-x-1/2 bg-slate-900/70 backdrop-blur-md px-4 py-3 rounded-full border border-white/20 shadow-[0_10px_40px_rgba(0,0,0,0.5)] transition-all duration-300 opacity-0 pointer-events-none translate-y-4 flex items-center gap-3 z-40 w-[95%] max-w-[550px]">
+        <button id="play-pause-btn" class="text-white hover:text-blue-400 transition-colors focus:outline-none flex-shrink-0 pl-1">
+            <svg id="play-icon" class="hidden" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <svg id="pause-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+        </button>
+
+        <span id="time-current" class="text-[11px] text-slate-300 font-mono w-9 text-right flex-shrink-0">00:00</span>
+        <input type="range" id="video-progress" class="flex-1 h-1.5 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-blue-500" value="0" min="0" step="0.1">
+        <span id="time-total" class="text-[11px] text-slate-300 font-mono w-9 flex-shrink-0">00:00</span>
+        
+        <div class="flex items-center gap-1 border-l border-white/20 pl-3 pr-1 flex-shrink-0">
+            <input type="range" id="video-speed" class="w-12 sm:w-16 h-1.5 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-blue-500" value="1" min="0.5" max="1.5" step="0.1" title="調整播放速度">
+            <span id="speed-label" class="text-[10px] text-slate-300 font-mono w-7 text-right">1.0x</span>
+        </div>
+    </div>
+
+    <div id="gps-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center opacity-0 pointer-events-none transition-opacity">
+        <div class="bg-slate-800 p-5 rounded-lg border border-white/20 w-[90%] max-w-sm shadow-2xl">
+            <h3 class="text-white text-[15px] font-bold mb-2 flex items-center gap-2">📍 手動寫入 GPS 座標</h3>
+            <p class="text-[11px] text-slate-400 mb-4 leading-relaxed">請輸入經緯度，或貼上帶有座標的 Google Maps 網址。<br>完成後系統將為您自動產生一張包含定位資訊的 JPG 檔。</p>
+            <input type="text" id="gps-input" placeholder="例如: 25.0339, 121.5644" class="w-full bg-slate-900 border border-slate-600 text-white text-[12px] p-2 rounded mb-4 focus:outline-none focus:border-blue-500 placeholder-slate-600">
+            <div class="flex justify-end gap-2">
+                <button id="gps-cancel-btn" class="px-3 py-1.5 text-[11px] font-bold text-slate-300 hover:bg-slate-700 rounded transition-colors">取消</button>
+                <button id="gps-save-btn" class="px-3 py-1.5 text-[11px] font-bold bg-emerald-600 hover:bg-emerald-500 text-white rounded shadow transition-colors flex items-center gap-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+                    寫入並下載
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/",
+                "exifr": "https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.esm.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import exifr from 'exifr';
+
+        let scene, camera, renderer, sphere, plane, controls;
+        const container = document.getElementById('canvas-container');
+        const fileInput = document.getElementById('fileInput');
+        const dropZone = document.getElementById('drop-zone');
+        const statusCard = document.getElementById('status-card');
+        const statusText = document.getElementById('status-text');
+        
+        const gpsBanner = document.getElementById('gps-banner');
+        const gpsText = document.getElementById('gps-text');
+        const gpsLink = document.getElementById('gps-link');
+        const non360Banner = document.getElementById('non-360-banner');
+        
+        const gpsAddBtn = document.getElementById('gps-add-btn');
+        const gpsModal = document.getElementById('gps-modal');
+        const gpsInput = document.getElementById('gps-input');
+        const gpsCancelBtn = document.getElementById('gps-cancel-btn');
+        const gpsSaveBtn = document.getElementById('gps-save-btn');
+
+        const videoControls = document.getElementById('video-controls');
+        const playPauseBtn = document.getElementById('play-pause-btn');
+        const playIcon = document.getElementById('play-icon');
+        const pauseIcon = document.getElementById('pause-icon');
+        const videoSpeed = document.getElementById('video-speed');
+        const speedLabel = document.getElementById('speed-label');
+        const videoProgress = document.getElementById('video-progress');
+        const timeCurrent = document.getElementById('time-current');
+        const timeTotal = document.getElementById('time-total');
+        
+        let isSeeking = false;
+        let controlsTimeout = null;
+
+        const galleryContainer = document.getElementById('galleryContainer');
+        const maxHistory = 5; 
+        
+        let imageHistory = []; 
+        let currentPlayingVideo = null;
+        let currentHistoryItem = null; 
+
+        gpsAddBtn.addEventListener('click', () => {
+            gpsModal.classList.remove('opacity-0', 'pointer-events-none');
+        });
+        gpsCancelBtn.addEventListener('click', () => {
+            gpsModal.classList.add('opacity-0', 'pointer-events-none');
+            gpsInput.value = '';
+        });
+
+        function parseCoordinates(input) {
+            const regex = /(-?\d{1,3}\.\d+)[^\d-]+(-?\d{1,3}\.\d+)/;
+            const match = input.match(regex);
+            if (match) {
+                return { lat: parseFloat(match[1]), lng: parseFloat(match[2]) };
+            }
+            return null;
+        }
+
+        function degToDmsRational(deg) {
+            let d = Math.abs(deg);
+            let degInt = Math.floor(d);
+            let minFloat = (d - degInt) * 60;
+            let minInt = Math.floor(minFloat);
+            let secFloat = (minFloat - minInt) * 60;
+            let secInt = Math.round(secFloat * 10000); 
+            return [[degInt, 1], [minInt, 1], [secInt, 10000]];
+        }
+
+        function addPanoXMP(dataUrl) {
+            const xmpString = '<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:GPano="http://ns.google.com/photos/1.0/panorama/"><GPano:ProjectionType>equirectangular</GPano:ProjectionType><GPano:UsePanoramaViewer>True</GPano:UsePanoramaViewer></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>';
+            const header = "http://ns.adobe.com/xap/1.0/\x00";
+            const segmentData = header + xmpString;
+            
+            const segmentBytes = [];
+            for (let i = 0; i < segmentData.length; i++) {
+                segmentBytes.push(segmentData.charCodeAt(i));
+            }
+            
+            const length = segmentBytes.length + 2;
+            const app1Segment = [0xFF, 0xE1, (length >> 8) & 0xFF, length & 0xFF, ...segmentBytes];
+            
+            const b64 = dataUrl.split(',')[1];
+            const binStr = atob(b64);
+            const imgBytes = new Uint8Array(binStr.length);
+            for (let i = 0; i < binStr.length; i++) {
+                imgBytes[i] = binStr.charCodeAt(i);
+            }
+            
+            if (imgBytes[0] !== 0xFF || imgBytes[1] !== 0xD8) return dataUrl;
+            
+            const newImgBytes = new Uint8Array(imgBytes.length + app1Segment.length);
+            newImgBytes.set(imgBytes.subarray(0, 2), 0);
+            newImgBytes.set(app1Segment, 2);
+            newImgBytes.set(imgBytes.subarray(2), 2 + app1Segment.length);
+            
+            let newBinStr = "";
+            const chunkSize = 8192;
+            for (let i = 0; i < newImgBytes.length; i += chunkSize) {
+                newBinStr += String.fromCharCode.apply(null, newImgBytes.subarray(i, i + chunkSize));
+            }
+            return "data:image/jpeg;base64," + btoa(newBinStr);
+        }
+
+        gpsSaveBtn.addEventListener('click', () => {
+            const inputStr = gpsInput.value;
+            const coords = parseCoordinates(inputStr);
+            if (!coords) {
+                showToast('無法解析座標，請檢查輸入格式');
+                return;
+            }
+
+            statusCard.classList.remove('hidden');
+            statusText.innerText = "寫入座標中...";
+
+            const file = currentHistoryItem.file;
+            const reader = new FileReader();
+
+            reader.onload = function(e) {
+                try {
+                    let dataUrl = e.target.result;
+                    let exifObj;
+                    try {
+                        exifObj = piexif.load(dataUrl);
+                    } catch(err) {
+                        exifObj = {"0th":{}, "Exif":{}, "GPS":{}};
+                    }
+
+                    exifObj.GPS[piexif.GPSIFD.GPSLatitudeRef] = coords.lat < 0 ? 'S' : 'N';
+                    exifObj.GPS[piexif.GPSIFD.GPSLatitude] = degToDmsRational(coords.lat);
+                    exifObj.GPS[piexif.GPSIFD.GPSLongitudeRef] = coords.lng < 0 ? 'W' : 'E';
+                    exifObj.GPS[piexif.GPSIFD.GPSLongitude] = degToDmsRational(coords.lng);
+                    exifObj.GPS[piexif.GPSIFD.GPSVersionID] = [2, 2, 0, 0];
+
+                    let exifStr = piexif.dump(exifObj);
+                    let newDataUrl = piexif.insert(exifStr, dataUrl);
+
+                    newDataUrl = addPanoXMP(newDataUrl);
+
+                    let link = document.createElement('a');
+                    link.href = newDataUrl;
+                    let origName = file.name.replace(/\.[^/.]+$/, "");
+                    link.download = origName + "_gps.jpg";
+                    link.click();
+
+                    currentHistoryItem.gps = { latitude: coords.lat, longitude: coords.lng };
+                    setActiveThumbnail(currentHistoryItem);
+
+                    gpsModal.classList.add('opacity-0', 'pointer-events-none');
+                    gpsInput.value = '';
+                    showToast('已成功寫入並下載！');
+                } catch (err) {
+                    console.error("寫入 EXIF 失敗", err);
+                    showToast('寫入失敗，該檔案格式可能不支援');
+                } finally {
+                    statusCard.classList.add('hidden');
+                }
+            };
+            reader.readAsDataURL(file);
+        });
+
+        function formatTime(seconds) {
+            if (isNaN(seconds)) return "00:00";
+            const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+            const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+            return `${m}:${s}`;
+        }
+
+        function showVideoControls() {
+            if (!currentPlayingVideo) return; 
+            videoControls.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-4');
+            videoControls.classList.add('opacity-100', 'pointer-events-auto', 'translate-y-0');
+
+            if (controlsTimeout) clearTimeout(controlsTimeout);
+            controlsTimeout = setTimeout(() => {
+                hideVideoControls();
+            }, 5000);
+        }
+
+        function hideVideoControls() {
+            videoControls.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
+            videoControls.classList.remove('opacity-100', 'pointer-events-auto', 'translate-y-0');
+        }
+
+        container.addEventListener('pointerdown', showVideoControls);
+        videoControls.addEventListener('pointerdown', showVideoControls);
+        videoControls.addEventListener('mousemove', showVideoControls);
+        videoControls.addEventListener('touchstart', showVideoControls, {passive: true});
+
+        playPauseBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (currentPlayingVideo) {
+                if (currentPlayingVideo.paused) {
+                    currentPlayingVideo.play();
+                } else {
+                    currentPlayingVideo.pause();
+                }
+            }
+        });
+
+        videoSpeed.addEventListener('input', (e) => {
+            const speed = parseFloat(e.target.value);
+            speedLabel.innerText = speed.toFixed(1) + 'x';
+            if (currentPlayingVideo) {
+                currentPlayingVideo.playbackRate = speed;
+            }
+        });
+
+        videoProgress.addEventListener('mousedown', () => isSeeking = true);
+        videoProgress.addEventListener('touchstart', () => isSeeking = true, {passive: true});
+        videoProgress.addEventListener('mouseup', () => isSeeking = false);
+        videoProgress.addEventListener('touchend', () => isSeeking = false);
+        videoProgress.addEventListener('input', (e) => {
+            if (currentPlayingVideo) {
+                currentPlayingVideo.currentTime = e.target.value;
+                timeCurrent.innerText = formatTime(currentPlayingVideo.currentTime);
+            }
+        });
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x020607);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 0, 0.1);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            container.appendChild(renderer.domElement);
+
+            // 建立 360 球體
+            const sphereGeo = new THREE.SphereGeometry(500, 64, 32);
+            sphereGeo.scale(-1, 1, 1);
+            const sphereMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.1 });
+            sphere = new THREE.Mesh(sphereGeo, sphereMat);
+            scene.add(sphere);
+
+            // 建立 2D 檢視平面 (預設隱藏，放在相機正前方 -50 的位置)
+            const planeGeo = new THREE.PlaneGeometry(1, 1);
+            const planeMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.1 });
+            plane = new THREE.Mesh(planeGeo, planeMat);
+            plane.position.set(0, 0, -50);
+            plane.visible = false;
+            scene.add(plane);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.rotateSpeed = -0.25;
+            controls.enablePan = false;
+            controls.enableZoom = false;
+
+            container.addEventListener('wheel', onMouseWheel, { passive: false });
+            window.addEventListener('resize', onWindowResize);
+            animate();
+        }
+
+        function onMouseWheel(event) {
+            event.preventDefault();
+            const zoomFactor = 1.2;
+            if (event.deltaY < 0) {
+                camera.fov /= zoomFactor;
+            } else {
+                camera.fov *= zoomFactor;
+            }
+            camera.fov = THREE.MathUtils.clamp(camera.fov, 20, 85);
+            camera.updateProjectionMatrix();
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+
+            // 視窗縮放時，如果處於平面模式，自動重新計算 2D 畫布大小
+            if (plane && plane.visible && plane.material.map) {
+                const map = plane.material.map;
+                const img = map.image;
+                if (img) {
+                    const w = map instanceof THREE.VideoTexture ? img.videoWidth : img.width;
+                    const h = map instanceof THREE.VideoTexture ? img.videoHeight : img.height;
+                    
+                    if (w && h) {
+                        const aspect = w / h;
+                        const dist = 50.1; 
+                        const baseFov = 60 * Math.PI / 180;
+                        const visHeight = 2 * Math.tan(baseFov / 2) * dist;
+                        const visWidth = visHeight * camera.aspect;
+                        
+                        let planeW, planeH;
+                        if (aspect > camera.aspect) {
+                            planeW = visWidth * 0.9; 
+                            planeH = planeW / aspect;
+                        } else {
+                            planeH = visHeight * 0.9;
+                            planeW = planeH * aspect;
+                        }
+                        plane.geometry.dispose();
+                        plane.geometry = new THREE.PlaneGeometry(planeW, planeH);
+                    }
+                }
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+
+            const polarAngle = controls.getPolarAngle();
+            const threshold = 0.8; 
+            
+            // 只有在 360 模式下低頭看地板時才顯示 GPS 面板 (平面模式時 sphere 隱藏不會觸發)
+            if (sphere.visible && sphere.material.map && polarAngle < threshold) {
+                if (!gpsBanner.classList.contains('show-banner')) {
+                    gpsBanner.classList.add('show-banner');
+                    gpsBanner.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-4');
+                    gpsBanner.classList.add('opacity-100', 'pointer-events-auto', 'translate-y-0');
+                }
+            } else {
+                if (gpsBanner.classList.contains('show-banner')) {
+                    gpsBanner.classList.remove('show-banner');
+                    gpsBanner.classList.remove('opacity-100', 'pointer-events-auto', 'translate-y-0');
+                    gpsBanner.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
+                }
+            }
+            renderer.render(scene, camera);
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('msgToast');
+            toast.innerText = msg;
+            toast.style.opacity = '1';
+            setTimeout(() => toast.style.opacity = '0', 3000);
+        }
+
+        // 智慧切換 3D 全景或 2D 平面顯示模式
+        function setupDisplayMode(width, height, texture) {
+            const aspect = width / height;
+            // 允許 5% 誤差 (因少部分影片或圖片為 1920x1080 但其實是 360，或 1920x960 比例接近)
+            const is360 = Math.abs(aspect - 2.0) <= 0.05; 
+            
+            if (is360) {
+                // 360 球體模式
+                sphere.visible = true;
+                plane.visible = false;
+                controls.enableRotate = true; // 允許旋轉
+                
+                sphere.material.map = texture;
+                sphere.material.color.set(0xffffff);
+                sphere.material.opacity = 1;
+                sphere.material.transparent = false;
+                sphere.material.needsUpdate = true;
+
+                non360Banner.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
+                non360Banner.classList.remove('opacity-100', 'translate-y-0');
+            } else {
+                // 2D 平面模式
+                sphere.visible = false;
+                plane.visible = true;
+                controls.enableRotate = false; // 鎖定旋轉
+
+                // 強制將相機視角轉正面向平布
+                camera.position.set(0, 0, 0.1);
+                controls.target.set(0, 0, 0);
+                camera.fov = 60; // 重置縮放
+                camera.updateProjectionMatrix();
+
+                // 計算相機與畫布距離能顯示的最大範圍
+                const dist = 50.1; // camera(z:0.1) 到 plane(z:-50)
+                const baseFov = 60 * Math.PI / 180;
+                const visHeight = 2 * Math.tan(baseFov / 2) * dist;
+                const visWidth = visHeight * camera.aspect;
+
+                // 讓 2D 畫面依比例縮放至螢幕 90% 的安全範圍
+                let planeW, planeH;
+                if (aspect > camera.aspect) {
+                    planeW = visWidth * 0.9; 
+                    planeH = planeW / aspect;
+                } else {
+                    planeH = visHeight * 0.9;
+                    planeW = planeH * aspect;
+                }
+
+                plane.geometry.dispose();
+                plane.geometry = new THREE.PlaneGeometry(planeW, planeH);
+
+                plane.material.map = texture;
+                plane.material.color.set(0xffffff);
+                plane.material.opacity = 1;
+                plane.material.transparent = false;
+                plane.material.needsUpdate = true;
+
+                // 顯示非 360 提示標籤
+                non360Banner.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-4');
+                non360Banner.classList.add('opacity-100', 'translate-y-0');
+                
+                // 平面模式強制隱藏地上的 GPS 面板
+                gpsBanner.classList.remove('show-banner', 'opacity-100', 'pointer-events-auto', 'translate-y-0');
+                gpsBanner.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
+            }
+            controls.update();
+        }
+
+        function applyMedia(historyItem) {
+            statusCard.classList.remove('hidden');
+            statusText.innerText = "載入中...";
+
+            if (currentPlayingVideo) {
+                currentPlayingVideo.pause();
+                currentPlayingVideo.removeAttribute('src');
+                currentPlayingVideo.load();
+                currentPlayingVideo = null;
+            }
+
+            if (historyItem.type === 'video') {
+                currentPlayingVideo = true; 
+                showVideoControls();
+                
+                playIcon.classList.add('hidden');
+                pauseIcon.classList.remove('hidden');
+                videoProgress.value = 0;
+                timeCurrent.innerText = "00:00";
+                timeTotal.innerText = "00:00";
+                videoSpeed.value = 1;
+                speedLabel.innerText = "1.0x";
+
+                const videoElement = document.createElement('video');
+                videoElement.src = historyItem.url;
+                videoElement.crossOrigin = 'anonymous';
+                videoElement.loop = true;
+                videoElement.muted = true;
+                videoElement.playsInline = true;
+                videoElement.playbackRate = 1;
+
+                videoElement.addEventListener('loadedmetadata', () => {
+                    videoProgress.max = videoElement.duration;
+                    timeTotal.innerText = formatTime(videoElement.duration);
+                });
+                videoElement.addEventListener('timeupdate', () => {
+                    if (!isSeeking) {
+                        videoProgress.value = videoElement.currentTime;
+                        timeCurrent.innerText = formatTime(videoElement.currentTime);
+                    }
+                });
+                videoElement.addEventListener('play', () => {
+                    playIcon.classList.add('hidden');
+                    pauseIcon.classList.remove('hidden');
+                });
+                videoElement.addEventListener('pause', () => {
+                    pauseIcon.classList.add('hidden');
+                    playIcon.classList.remove('hidden');
+                });
+
+                videoElement.play().then(() => {
+                    const videoTexture = new THREE.VideoTexture(videoElement);
+                    videoTexture.colorSpace = THREE.SRGBColorSpace;
+                    
+                    setupDisplayMode(videoElement.videoWidth, videoElement.videoHeight, videoTexture);
+                    
+                    currentPlayingVideo = videoElement;
+                    statusCard.classList.add('hidden');
+                }).catch(err => {
+                    console.error("影片播放錯誤", err);
+                    showToast("影片載入失敗");
+                    statusCard.classList.add('hidden');
+                });
+            } else {
+                if (controlsTimeout) clearTimeout(controlsTimeout);
+                hideVideoControls();
+
+                const textureLoader = new THREE.TextureLoader();
+                textureLoader.load(historyItem.url, (texture) => {
+                    texture.colorSpace = THREE.SRGBColorSpace;
+                    
+                    setupDisplayMode(texture.image.width, texture.image.height, texture);
+                    
+                    statusCard.classList.add('hidden');
+                }, undefined, (err) => {
+                    showToast("圖片解析失敗");
+                    statusCard.classList.add('hidden');
+                });
+            }
+        }
+
+        function setActiveThumbnail(historyItem) {
+            const gpsData = historyItem.gps;
+            const activeImgElement = historyItem.element;
+            const isJpeg = historyItem.file.type === 'image/jpeg' || historyItem.file.type === 'image/jpg';
+
+            imageHistory.forEach(item => {
+                item.element.classList.remove('border-blue-500', 'opacity-100');
+                item.element.classList.add('border-transparent', 'opacity-50');
+            });
+            activeImgElement.classList.remove('border-transparent', 'opacity-50');
+            activeImgElement.classList.add('border-blue-500', 'opacity-100');
+
+            if (gpsData && gpsData.latitude && gpsData.longitude) {
+                gpsText.innerText = `📍 座標：${gpsData.latitude.toFixed(5)}, ${gpsData.longitude.toFixed(5)}`;
+                
+                const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+                if (isMobile) {
+                    gpsLink.href = `geo:${gpsData.latitude},${gpsData.longitude}?q=${gpsData.latitude},${gpsData.longitude}`;
+                } else {
+                    gpsLink.href = `https://www.google.com/maps?q=${gpsData.latitude},${gpsData.longitude}`;
+                }
+                
+                gpsLink.classList.remove('hidden');
+                gpsAddBtn.classList.add('hidden'); 
+            } else {
+                gpsText.innerText = '無座標資訊';
+                gpsLink.classList.add('hidden');
+                
+                if (isJpeg) {
+                    gpsAddBtn.classList.remove('hidden');
+                } else {
+                    gpsAddBtn.classList.add('hidden');
+                }
+            }
+        }
+
+        function removeThumbnail(url, wrapper, imgEl) {
+            wrapper.remove(); 
+            const index = imageHistory.findIndex(item => item.url === url);
+            if (index > -1) {
+                const isCurrentActive = imgEl.classList.contains('border-blue-500');
+                URL.revokeObjectURL(imageHistory[index].url); 
+                imageHistory.splice(index, 1);
+                
+                if (isCurrentActive) {
+                    if (imageHistory.length > 0) {
+                        currentHistoryItem = imageHistory[0];
+                        setActiveThumbnail(currentHistoryItem);
+                        applyMedia(currentHistoryItem); 
+                    } else {
+                        currentHistoryItem = null;
+                        if (currentPlayingVideo) {
+                            currentPlayingVideo.pause();
+                            currentPlayingVideo = null;
+                        }
+                        
+                        // 清空雙模式材質，並補回透明屬性以維持深色底
+                        sphere.material.map = null;
+                        sphere.material.transparent = true;
+                        sphere.material.opacity = 0.1;
+                        sphere.material.needsUpdate = true;
+                        
+                        plane.material.map = null;
+                        plane.material.transparent = true;
+                        plane.material.opacity = 0.1;
+                        plane.material.needsUpdate = true;
+                        
+                        // 重置為預設 360 空白狀態
+                        sphere.visible = true;
+                        plane.visible = false;
+                        controls.enableRotate = true;
+
+                        gpsBanner.classList.remove('show-banner', 'opacity-100', 'pointer-events-auto', 'translate-y-0');
+                        gpsBanner.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
+                        non360Banner.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
+                        non360Banner.classList.remove('opacity-100', 'translate-y-0');
+                        
+                        if (controlsTimeout) clearTimeout(controlsTimeout);
+                        hideVideoControls();
+                    }
+                }
+            }
+            if (imageHistory.length === 0) {
+                galleryContainer.classList.add('hidden');
+            }
+        }
+
+        const toggleBtn = document.getElementById('toggleBtn');
+        const mainPanel = document.getElementById('mainPanel');
+        const toggleIcon = document.getElementById('toggleIcon');
+        let isMinimized = false;
+        toggleBtn.addEventListener('click', () => {
+            isMinimized = !isMinimized;
+            if (isMinimized) {
+                mainPanel.classList.add('panel-minimized');
+                toggleIcon.innerHTML = '<path d="m6 9 6 6 6-6"/>'; 
+            } else {
+                mainPanel.classList.remove('panel-minimized');
+                toggleIcon.innerHTML = '<path d="m18 15-6-6-6 6"/>';
+            }
+        });
+
+        async function handleFile(file) {
+            const isVideo = file.type.startsWith('video/');
+            const isImage = file.type.startsWith('image/');
+            
+            if (!isImage && !isVideo) {
+                showToast('請上傳有效的照片或影片');
+                return;
+            }
+
+            statusCard.classList.remove('hidden');
+            statusText.innerText = isVideo ? "解析影片中..." : "解析相片資訊中...";
+
+            let gpsData = null;
+            if (isImage) {
+                try {
+                    gpsData = await exifr.gps(file);
+                } catch (err) {
+                    console.warn('無法讀取 EXIF 資訊:', err);
+                }
+            }
+
+            const objectUrl = URL.createObjectURL(file);
+            galleryContainer.classList.remove('hidden');
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'relative w-full flex-shrink-0 group';
+
+            let mediaEl;
+            if (isVideo) {
+                mediaEl = document.createElement('video');
+                mediaEl.src = objectUrl;
+                mediaEl.muted = true;
+                mediaEl.preload = 'metadata'; 
+            } else {
+                mediaEl = document.createElement('img');
+                mediaEl.src = objectUrl;
+            }
+            
+            mediaEl.className = 'w-full h-14 object-cover rounded shadow-sm cursor-pointer border-[2px] border-transparent opacity-50 hover:opacity-100 transition-all';
+            mediaEl.title = file.name;
+            wrapper.appendChild(mediaEl);
+
+            if (isVideo) {
+                const playIcon = document.createElement('div');
+                playIcon.innerHTML = '▶';
+                playIcon.className = 'absolute inset-0 flex items-center justify-center text-white/80 text-[10px] pointer-events-none drop-shadow-md';
+                wrapper.appendChild(playIcon);
+            }
+            
+            const delBtn = document.createElement('button');
+            delBtn.innerHTML = '×';
+            delBtn.className = 'absolute top-1 right-1 bg-slate-900/80 hover:bg-red-500 text-white rounded-full w-4 h-4 flex items-center justify-center text-[12px] font-bold leading-none shadow-md transition-all opacity-0 group-hover:opacity-100';
+            delBtn.title = '刪除此媒體';
+
+            const historyItem = { 
+                url: objectUrl, 
+                element: mediaEl, 
+                wrapper: wrapper, 
+                gps: gpsData, 
+                type: isVideo ? 'video' : 'image',
+                file: file 
+            };
+
+            mediaEl.onclick = () => {
+                currentHistoryItem = historyItem;
+                setActiveThumbnail(historyItem);
+                applyMedia(historyItem);
+            };
+
+            delBtn.onclick = (e) => {
+                e.stopPropagation(); 
+                removeThumbnail(objectUrl, wrapper, mediaEl);
+            };
+
+            wrapper.appendChild(delBtn);
+            galleryContainer.insertBefore(wrapper, galleryContainer.firstChild);
+            imageHistory.unshift(historyItem);
+
+            if (imageHistory.length > maxHistory) {
+                const removedItem = imageHistory.pop();
+                removedItem.wrapper.remove(); 
+                URL.revokeObjectURL(removedItem.url); 
+            }
+
+            currentHistoryItem = historyItem;
+            setActiveThumbnail(historyItem);
+            applyMedia(historyItem);
+        }
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+                fileInput.value = ''; 
+            }
+        });
+
+        window.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('active');
+        });
+
+        window.addEventListener('dragleave', () => {
+            dropZone.classList.remove('active');
+        });
+
+        window.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('active');
+            const file = e.dataTransfer.files[0];
+            handleFile(file);
+        });
+
+        init();
+    </script>
+</body>
+</html>
