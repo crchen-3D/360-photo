@@ -1,0 +1,8 @@
+{
+  "name": "360-photo",
+  "description": "360° 全景照片與影片瀏覽器及工程計算工具作品集",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

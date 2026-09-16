@@ -1,0 +1,14 @@
+{
+  "name": "360-photo",
+  "version": "1.0.0",
+  "description": "A web browser for 360° panoramic photos and videos, and deflection calculator.",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "build": "node -e \"console.log('Build complete')\"",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
